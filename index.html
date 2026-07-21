@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>VR Garbage Sorting</title>
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+    #hud {
+      position: fixed; top: 12px; left: 12px; z-index: 999;
+      background: rgba(0,0,0,0.55); color: #fff; padding: 10px 14px;
+      border-radius: 8px; font-size: 14px; max-width: 260px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  Look at a piece of garbage (gaze/hover with the reticle). The correct bin
+  will glow, scale up, and a line will connect them. On a VR headset, just
+  turn your head toward an item.
+</div>
+
+<script>
+/* ============================================================
+   COMPONENT: billboard
+   Makes any entity continuously face the camera (used for labels).
+   Core A-Frame has no built-in "look-at" component, so this is
+   a tiny hand-rolled replacement.
+   ============================================================ */
+AFRAME.registerComponent('billboard', {
+  tick: function () {
+    var cam = this.el.sceneEl.camera;
+    if (!cam) return;
+    var camWorldPos = new THREE.Vector3();
+    cam.getWorldPosition(camWorldPos);
+    this.el.object3D.lookAt(camWorldPos);
+  }
+});
+
+/* ============================================================
+   COMPONENT: garbage-item
+   Attach to any garbage entity with data-bin="plastic|paper|organic|metal"
+   On hover (mouseenter from A-Frame cursor/raycaster) it:
+     - highlights the matching bin (emissive glow + scale pulse)
+     - draws a connecting line from item -> bin
+     - shows a floating label with the correct category
+   On mouseleave it reverts everything.
+   ============================================================ */
+AFRAME.registerComponent('garbage-item', {
+  schema: {
+    bin: { type: 'string' } // id of the target bin entity, e.g. "bin-plastic"
+  },
+
+  init: function () {
+    this.binEl = null;
+    this.line = null;
+    this.label = null;
+
+    this.onEnter = this.onEnter.bind(this);
+    this.onLeave = this.onLeave.bind(this);
+
+    this.el.addEventListener('mouseenter', this.onEnter);
+    this.el.addEventListener('mouseleave', this.onLeave);
+
+    // store original scale for the item itself
+    this.origScale = this.el.getAttribute('scale') || { x: 1, y: 1, z: 1 };
+  },
+
+  onEnter: function () {
+    var sceneEl = this.el.sceneEl;
+    this.binEl = document.getElementById(this.data.bin);
+    if (!this.binEl) return;
+
+    // 1) pop the garbage item itself
+    this.el.setAttribute('animation__pop', {
+      property: 'scale',
+      to: (this.origScale.x * 1.3) + ' ' + (this.origScale.y * 1.3) + ' ' + (this.origScale.z * 1.3),
+      dur: 200,
+      easing: 'easeOutElastic'
+    });
+
+    // 2) highlight the correct bin: glow + grow
+    this.binEl.setAttribute('animation__grow', {
+      property: 'scale',
+      to: '1.25 1.25 1.25',
+      dur: 250,
+      easing: 'easeOutQuad'
+    });
+    var mat = this.binEl.getAttribute('material') || {};
+    this.binOrigColor = mat.emissive || '#000000';
+    this.binOrigIntensity = mat.emissiveIntensity !== undefined ? mat.emissiveIntensity : 0;
+    this.binEl.setAttribute('material', 'emissive', '#ffffff');
+    this.binEl.setAttribute('material', 'emissiveIntensity', 0.6);
+
+    // 3) draw connecting line from item to bin
+    var itemPos = this.el.object3D.getWorldPosition(new THREE.Vector3());
+    var binPos = this.binEl.object3D.getWorldPosition(new THREE.Vector3());
+    binPos.y += 0.9; // aim at the top of the bin, not its base
+
+    this.line = document.createElement('a-entity');
+    this.line.setAttribute('line', {
+      start: itemPos.x + ' ' + (itemPos.y + 0.3) + ' ' + itemPos.z,
+      end: binPos.x + ' ' + binPos.y + ' ' + binPos.z,
+      color: '#00ff88'
+    });
+    sceneEl.appendChild(this.line);
+
+    // 4) floating label above the item naming the correct bin
+    var binName = this.binEl.getAttribute('data-name') || 'BIN';
+    this.label = document.createElement('a-text');
+    this.label.setAttribute('value', '-> ' + binName);
+    this.label.setAttribute('align', 'center');
+    this.label.setAttribute('color', '#00ff88');
+    this.label.setAttribute('scale', '0.6 0.6 0.6');
+    this.label.setAttribute('position', itemPos.x + ' ' + (itemPos.y + 0.6) + ' ' + itemPos.z);
+    this.label.setAttribute('billboard', '');
+    sceneEl.appendChild(this.label);
+  },
+
+  onLeave: function () {
+    // revert item scale
+    this.el.setAttribute('animation__pop', {
+      property: 'scale',
+      to: this.origScale.x + ' ' + this.origScale.y + ' ' + this.origScale.z,
+      dur: 200,
+      easing: 'easeOutQuad'
+    });
+
+    if (this.binEl) {
+      this.binEl.setAttribute('animation__grow', {
+        property: 'scale',
+        to: '1 1 1',
+        dur: 250,
+        easing: 'easeOutQuad'
+      });
+      this.binEl.setAttribute('material', 'emissive', this.binOrigColor);
+      this.binEl.setAttribute('material', 'emissiveIntensity', this.binOrigIntensity);
+    }
+
+    if (this.line && this.line.parentNode) this.line.parentNode.removeChild(this.line);
+    if (this.label && this.label.parentNode) this.label.parentNode.removeChild(this.label);
+    this.line = null;
+    this.label = null;
+    this.binEl = null;
+  }
+});
+
+/* Small idle bob so garbage items feel alive / easier to spot */
+AFRAME.registerComponent('bob', {
+  schema: { amp: { default: 0.05 }, speed: { default: 1 } },
+  init: function () { this.t = Math.random() * 10; this.baseY = this.el.object3D.position.y; },
+  tick: function (time, delta) {
+    this.t += delta / 1000;
+    this.el.object3D.position.y = this.baseY + Math.sin(this.t * this.data.speed) * this.data.amp;
+  }
+});
+</script>
+
+<a-scene>
+
+  <a-assets></a-assets>
+
+  <!-- SKY & LIGHTING -->
+  <a-sky color="#bcd9ea"></a-sky>
+  <a-entity light="type: ambient; intensity: 0.6"></a-entity>
+  <a-entity light="type: directional; intensity: 0.6" position="2 4 2"></a-entity>
+
+  <!-- GROUND -->
+  <a-plane rotation="-90 0 0" width="24" height="24" color="#8a9a5b" shadow></a-plane>
+
+  <!-- ============================================================
+       BINS (the correct disposal targets)
+       ============================================================ -->
+  <a-entity id="bin-plastic" data-name="PLASTIC BIN"
+            geometry="primitive: box; width: 1; height: 1.4; depth: 1"
+            material="color: #2196f3; emissive: #000; emissiveIntensity: 0"
+            position="-7 0.7 -7"></a-entity>
+  <a-text value="PLASTIC" align="center" color="#0d47a1" scale="1.4 1.4 1.4"
+          position="-7 1.6 -7" billboard></a-text>
+
+  <a-entity id="bin-paper" data-name="PAPER BIN"
+            geometry="primitive: box; width: 1; height: 1.4; depth: 1"
+            material="color: #ffca28; emissive: #000; emissiveIntensity: 0"
+            position="7 0.7 -7"></a-entity>
+  <a-text value="PAPER" align="center" color="#8d6e00" scale="1.4 1.4 1.4"
+          position="7 1.6 -7" billboard></a-text>
+
+  <a-entity id="bin-organic" data-name="ORGANIC / COMPOST BIN"
+            geometry="primitive: box; width: 1; height: 1.4; depth: 1"
+            material="color: #4caf50; emissive: #000; emissiveIntensity: 0"
+            position="-7 0.7 7"></a-entity>
+  <a-text value="ORGANIC" align="center" color="#1b5e20" scale="1.4 1.4 1.4"
+          position="-7 1.6 7" billboard></a-text>
+
+  <a-entity id="bin-metal" data-name="METAL BIN"
+            geometry="primitive: box; width: 1; height: 1.4; depth: 1"
+            material="color: #9e9e9e; emissive: #000; emissiveIntensity: 0"
+            position="7 0.7 7"></a-entity>
+  <a-text value="METAL" align="center" color="#424242" scale="1.4 1.4 1.4"
+          position="7 1.6 7" billboard></a-text>
+
+  <!-- ============================================================
+       GARBAGE ITEMS (scattered on the ground, each tagged with the
+       bin it belongs in via the garbage-item component's "bin" prop)
+       ============================================================ -->
+
+  <!-- Plastic bottle -->
+  <a-entity class="garbage" garbage-item="bin: bin-plastic" bob position="-2 0.4 -1">
+    <a-cylinder radius="0.15" height="0.6" color="#42a5f5"></a-cylinder>
+    <a-cone radius-bottom="0.15" radius-top="0.05" height="0.15" position="0 0.35 0" color="#42a5f5"></a-cone>
+  </a-entity>
+
+  <!-- Newspaper / cardboard -->
+  <a-entity class="garbage" garbage-item="bin: bin-paper" bob position="1 0.05 -2" rotation="-90 0 0">
+    <a-box width="0.5" height="0.7" depth="0.02" color="#f5deb3"></a-box>
+  </a-entity>
+
+  <!-- Banana peel (organic) -->
+  <a-entity class="garbage" garbage-item="bin: bin-organic" bob position="2.5 0.15 1.5">
+    <a-torus radius="0.2" radius-tubular="0.05" color="#ffeb3b" rotation="90 0 0"></a-torus>
+  </a-entity>
+
+  <!-- Tin can (metal) -->
+  <a-entity class="garbage" garbage-item="bin: bin-metal" bob position="-2 0.25 2">
+    <a-cylinder radius="0.15" height="0.4" color="#b0bec5" metalness="0.8" roughness="0.2"></a-cylinder>
+  </a-entity>
+
+  <!-- Second plastic item: bottle cap / bag -->
+  <a-entity class="garbage" garbage-item="bin: bin-plastic" bob position="0 0.1 3">
+    <a-sphere radius="0.2" color="#64b5f6" theta-length="180"></a-sphere>
+  </a-entity>
+
+  <!-- Second paper item: crumpled ball -->
+  <a-entity class="garbage" garbage-item="bin: bin-paper" bob position="-3.5 0.15 -0.5">
+    <a-sphere radius="0.15" color="#fff59d"></a-sphere>
+  </a-entity>
+
+  <!-- Second organic item: apple core -->
+  <a-entity class="garbage" garbage-item="bin: bin-organic" bob position="3.5 0.2 -1.5">
+    <a-cylinder radius="0.1" height="0.3" color="#8bc34a"></a-cylinder>
+  </a-entity>
+
+  <!-- Second metal item: bottle cap -->
+  <a-entity class="garbage" garbage-item="bin: bin-metal" bob position="1.5 0.05 2.5">
+    <a-cylinder radius="0.12" height="0.05" color="#78909c" metalness="0.9" roughness="0.1"></a-cylinder>
+  </a-entity>
+
+  <!-- ============================================================
+       CAMERA / GAZE CURSOR
+       fuse:true makes the reticle "hover" activate mouseenter after
+       a short dwell time, which works for VR headset head-look and
+       for desktop mouse alike (no click needed).
+       ============================================================ -->
+  <a-entity id="rig" position="0 1.6 4">
+    <a-camera look-controls wasd-controls>
+      <a-entity cursor="fuse: true; fuseTimeout: 400"
+                position="0 0 -1"
+                geometry="primitive: ring; radiusInner: 0.008; radiusOuter: 0.014"
+                material="color: white; shader: flat"
+                animation__click="property: scale; startEvents: click; from: 0.1 0.1 0.1; to: 1 1 1; dur: 150"
+                raycaster="objects: .garbage; far: 20">
+      </a-entity>
+    </a-camera>
+  </a-entity>
+
+</a-scene>
+</body>
+</html>
